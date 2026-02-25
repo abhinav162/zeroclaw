@@ -963,6 +963,12 @@ pub struct BrowserBridgeConfig {
     /// Per-command timeout in milliseconds (default: 30000)
     #[serde(default = "default_browser_bridge_timeout_ms")]
     pub timeout_ms: u64,
+    /// Auto-start bridge server if not running (default: true)
+    #[serde(default = "default_true")]
+    pub auto_start: bool,
+    /// Path to bridge server.js (optional — uses bundled server if omitted)
+    #[serde(default)]
+    pub server_path: Option<String>,
 }
 
 fn default_browser_bridge_endpoint() -> String {
@@ -978,6 +984,8 @@ impl Default for BrowserBridgeConfig {
         Self {
             endpoint: default_browser_bridge_endpoint(),
             timeout_ms: default_browser_bridge_timeout_ms(),
+            auto_start: true,
+            server_path: None,
         }
     }
 }

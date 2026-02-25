@@ -268,6 +268,8 @@ pub fn all_tools_with_runtime(
             BridgeConfig {
                 endpoint: browser_config.bridge.endpoint.clone(),
                 timeout_ms: browser_config.bridge.timeout_ms,
+                auto_start: browser_config.bridge.auto_start,
+                server_path: browser_config.bridge.server_path.clone(),
             },
         )));
     }

@@ -62,6 +62,8 @@ impl Default for ComputerUseConfig {
 pub struct BridgeConfig {
     pub endpoint: String,
     pub timeout_ms: u64,
+    pub auto_start: bool,
+    pub server_path: Option<String>,
 }
 
 impl Default for BridgeConfig {
@@ -69,9 +71,14 @@ impl Default for BridgeConfig {
         Self {
             endpoint: "http://127.0.0.1:7823/command".into(),
             timeout_ms: 30_000,
+            auto_start: true,
+            server_path: None,
         }
     }
 }
+
+/// Bundled bridge server source — written to a temp file when auto_start is used.
+const BRIDGE_SERVER_JS: &str = include_str!("../../bridge-server/server.js");
 
 /// Browser automation tool using pluggable backends.
 pub struct BrowserTool {
@@ -84,6 +91,8 @@ pub struct BrowserTool {
     native_chrome_path: Option<String>,
     computer_use: ComputerUseConfig,
     bridge: BridgeConfig,
+    /// Handle to auto-spawned bridge server process (killed on drop).
+    bridge_process: tokio::sync::Mutex<Option<tokio::process::Child>>,
     #[cfg(feature = "browser-native")]
     native_state: tokio::sync::Mutex<native_backend::NativeBrowserState>,
 }
@@ -269,6 +278,7 @@ impl BrowserTool {
             native_chrome_path,
             computer_use,
             bridge,
+            bridge_process: tokio::sync::Mutex::new(None),
             #[cfg(feature = "browser-native")]
             native_state: tokio::sync::Mutex::new(native_backend::NativeBrowserState::default()),
         }
@@ -371,6 +381,82 @@ impl BrowserTool {
         }
     }
 
+    /// Spawn the bridge server if `auto_start` is enabled and it isn't already running.
+    async fn ensure_bridge_running(&self) -> anyhow::Result<()> {
+        if self.bridge_available() {
+            return Ok(());
+        }
+
+        if !self.bridge.auto_start {
+            anyhow::bail!(
+                "Bridge server is not running at {} and auto_start is disabled",
+                self.bridge.endpoint
+            );
+        }
+
+        let mut guard = self.bridge_process.lock().await;
+
+        // Check if we already spawned one that's still alive
+        if let Some(ref mut child) = *guard {
+            if child.try_wait()?.is_none() {
+                // Process still running — wait a moment for it to become ready
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                if self.bridge_available() {
+                    return Ok(());
+                }
+            }
+        }
+
+        // Determine server.js path: user-provided or write bundled to temp dir
+        let server_path = if let Some(ref path) = self.bridge.server_path {
+            std::path::PathBuf::from(path)
+        } else {
+            let dir = std::env::temp_dir().join("zeroclaw-bridge");
+            std::fs::create_dir_all(&dir)?;
+            let path = dir.join("server.js");
+            std::fs::write(&path, BRIDGE_SERVER_JS)?;
+            path
+        };
+
+        if !server_path.exists() {
+            anyhow::bail!(
+                "Bridge server script not found at {}",
+                server_path.display()
+            );
+        }
+
+        debug!("Auto-starting bridge server: node {}", server_path.display());
+
+        let child = Command::new("node")
+            .arg(&server_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .with_context(|| {
+                format!(
+                    "Failed to spawn bridge server. Ensure 'node' is installed. Path: {}",
+                    server_path.display()
+                )
+            })?;
+
+        *guard = Some(child);
+
+        // Wait for the server to become ready (up to 5s)
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if self.bridge_available() {
+                debug!("Bridge server is ready");
+                return Ok(());
+            }
+        }
+
+        anyhow::bail!(
+            "Bridge server was spawned but did not become reachable at {} within 5s",
+            self.bridge.endpoint
+        )
+    }
+
     async fn resolve_backend(&self) -> anyhow::Result<ResolvedBackend> {
         let configured = self.configured_backend()?;
 
@@ -407,15 +493,8 @@ impl BrowserTool {
                 Ok(ResolvedBackend::ComputerUse)
             }
             BrowserBackendKind::Bridge => {
-                if self.bridge_available() {
-                    Ok(ResolvedBackend::Bridge)
-                } else {
-                    anyhow::bail!(
-                        "browser.backend='bridge' but bridge server is unreachable at {}. \
-                         Start the bridge server: cd bridge-server && npm start",
-                        self.bridge.endpoint
-                    )
-                }
+                self.ensure_bridge_running().await?;
+                Ok(ResolvedBackend::Bridge)
             }
             BrowserBackendKind::Auto => {
                 if Self::rust_native_compiled() && self.rust_native_available() {
@@ -431,8 +510,10 @@ impl BrowserTool {
                     Err(err) => Some(err.to_string()),
                 };
 
-                if self.bridge_available() {
-                    return Ok(ResolvedBackend::Bridge);
+                if self.bridge.auto_start || self.bridge_available() {
+                    if self.ensure_bridge_running().await.is_ok() {
+                        return Ok(ResolvedBackend::Bridge);
+                    }
                 }
 
                 if Self::rust_native_compiled() {
@@ -2654,6 +2735,8 @@ mod tests {
             BridgeConfig {
                 endpoint: "http://127.0.0.1:7823/command".into(),
                 timeout_ms: 30_000,
+                auto_start: false,
+                server_path: None,
             },
         );
         assert_eq!(
