@@ -55,7 +55,7 @@ pub mod traits;
 pub mod web_fetch;
 pub mod web_search_tool;
 
-pub use browser::{BrowserTool, ComputerUseConfig};
+pub use browser::{BridgeConfig, BrowserTool, ComputerUseConfig};
 pub use browser_open::BrowserOpenTool;
 pub use composio::ComposioTool;
 pub use content_search::ContentSearchTool;
@@ -264,6 +264,10 @@ pub fn all_tools_with_runtime(
                 window_allowlist: browser_config.computer_use.window_allowlist.clone(),
                 max_coordinate_x: browser_config.computer_use.max_coordinate_x,
                 max_coordinate_y: browser_config.computer_use.max_coordinate_y,
+            },
+            BridgeConfig {
+                endpoint: browser_config.bridge.endpoint.clone(),
+                timeout_ms: browser_config.bridge.timeout_ms,
             },
         )));
     }

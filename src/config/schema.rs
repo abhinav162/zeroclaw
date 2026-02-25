@@ -952,6 +952,36 @@ impl Default for BrowserComputerUseConfig {
     }
 }
 
+/// Bridge server configuration (`[browser.bridge]` section).
+///
+/// Connects to a local Chrome extension bridge server for real browser control.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BrowserBridgeConfig {
+    /// Bridge server endpoint (default: http://127.0.0.1:7823/command)
+    #[serde(default = "default_browser_bridge_endpoint")]
+    pub endpoint: String,
+    /// Per-command timeout in milliseconds (default: 30000)
+    #[serde(default = "default_browser_bridge_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_browser_bridge_endpoint() -> String {
+    "http://127.0.0.1:7823/command".into()
+}
+
+fn default_browser_bridge_timeout_ms() -> u64 {
+    30_000
+}
+
+impl Default for BrowserBridgeConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: default_browser_bridge_endpoint(),
+            timeout_ms: default_browser_bridge_timeout_ms(),
+        }
+    }
+}
+
 /// Browser automation configuration (`[browser]` section).
 ///
 /// Controls the `browser_open` tool and browser automation backends.
@@ -966,7 +996,7 @@ pub struct BrowserConfig {
     /// Browser session name (for agent-browser automation)
     #[serde(default)]
     pub session_name: Option<String>,
-    /// Browser automation backend: "agent_browser" | "rust_native" | "computer_use" | "auto"
+    /// Browser automation backend: "agent_browser" | "rust_native" | "computer_use" | "bridge" | "auto"
     #[serde(default = "default_browser_backend")]
     pub backend: String,
     /// Headless mode for rust-native backend
@@ -981,6 +1011,9 @@ pub struct BrowserConfig {
     /// Computer-use sidecar configuration
     #[serde(default)]
     pub computer_use: BrowserComputerUseConfig,
+    /// Bridge server configuration (Chrome extension bridge)
+    #[serde(default)]
+    pub bridge: BrowserBridgeConfig,
 }
 
 fn default_browser_backend() -> String {
@@ -1002,6 +1035,7 @@ impl Default for BrowserConfig {
             native_webdriver_url: default_browser_webdriver_url(),
             native_chrome_path: None,
             computer_use: BrowserComputerUseConfig::default(),
+            bridge: BrowserBridgeConfig::default(),
         }
     }
 }
@@ -6194,6 +6228,7 @@ default_temperature = 0.7
                 max_coordinate_x: Some(3840),
                 max_coordinate_y: Some(2160),
             },
+            bridge: BrowserBridgeConfig::default(),
         };
         let toml_str = toml::to_string(&b).unwrap();
         let parsed: BrowserConfig = toml::from_str(&toml_str).unwrap();

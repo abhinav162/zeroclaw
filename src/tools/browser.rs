@@ -57,6 +57,22 @@ impl Default for ComputerUseConfig {
     }
 }
 
+/// Bridge server settings (Chrome extension bridge).
+#[derive(Clone, Debug)]
+pub struct BridgeConfig {
+    pub endpoint: String,
+    pub timeout_ms: u64,
+}
+
+impl Default for BridgeConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: "http://127.0.0.1:7823/command".into(),
+            timeout_ms: 30_000,
+        }
+    }
+}
+
 /// Browser automation tool using pluggable backends.
 pub struct BrowserTool {
     security: Arc<SecurityPolicy>,
@@ -67,6 +83,7 @@ pub struct BrowserTool {
     native_webdriver_url: String,
     native_chrome_path: Option<String>,
     computer_use: ComputerUseConfig,
+    bridge: BridgeConfig,
     #[cfg(feature = "browser-native")]
     native_state: tokio::sync::Mutex<native_backend::NativeBrowserState>,
 }
@@ -76,6 +93,7 @@ enum BrowserBackendKind {
     AgentBrowser,
     RustNative,
     ComputerUse,
+    Bridge,
     Auto,
 }
 
@@ -84,6 +102,7 @@ enum ResolvedBackend {
     AgentBrowser,
     RustNative,
     ComputerUse,
+    Bridge,
 }
 
 impl BrowserBackendKind {
@@ -93,9 +112,10 @@ impl BrowserBackendKind {
             "agent_browser" | "agentbrowser" => Ok(Self::AgentBrowser),
             "rust_native" | "native" => Ok(Self::RustNative),
             "computer_use" | "computeruse" => Ok(Self::ComputerUse),
+            "bridge" => Ok(Self::Bridge),
             "auto" => Ok(Self::Auto),
             _ => anyhow::bail!(
-                "Unsupported browser backend '{raw}'. Use 'agent_browser', 'rust_native', 'computer_use', or 'auto'"
+                "Unsupported browser backend '{raw}'. Use 'agent_browser', 'rust_native', 'computer_use', 'bridge', or 'auto'"
             ),
         }
     }
@@ -105,6 +125,7 @@ impl BrowserBackendKind {
             Self::AgentBrowser => "agent_browser",
             Self::RustNative => "rust_native",
             Self::ComputerUse => "computer_use",
+            Self::Bridge => "bridge",
             Self::Auto => "auto",
         }
     }
@@ -123,6 +144,17 @@ struct AgentBrowserResponse {
 struct ComputerUseResponse {
     #[serde(default)]
     success: Option<bool>,
+    #[serde(default)]
+    data: Option<Value>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// Response format from bridge server.
+#[derive(Debug, Deserialize)]
+struct BridgeResponse {
+    #[serde(default)]
+    success: bool,
     #[serde(default)]
     data: Option<Value>,
     #[serde(default)]
@@ -211,6 +243,7 @@ impl BrowserTool {
             "http://127.0.0.1:9515".into(),
             None,
             ComputerUseConfig::default(),
+            BridgeConfig::default(),
         )
     }
 
@@ -224,6 +257,7 @@ impl BrowserTool {
         native_webdriver_url: String,
         native_chrome_path: Option<String>,
         computer_use: ComputerUseConfig,
+        bridge: BridgeConfig,
     ) -> Self {
         Self {
             security,
@@ -234,6 +268,7 @@ impl BrowserTool {
             native_webdriver_url,
             native_chrome_path,
             computer_use,
+            bridge,
             #[cfg(feature = "browser-native")]
             native_state: tokio::sync::Mutex::new(native_backend::NativeBrowserState::default()),
         }
@@ -325,6 +360,17 @@ impl BrowserTool {
         Ok(endpoint_reachable(&endpoint, Duration::from_millis(500)))
     }
 
+    fn bridge_available(&self) -> bool {
+        let endpoint = self.bridge.endpoint.trim();
+        if endpoint.is_empty() {
+            return false;
+        }
+        match reqwest::Url::parse(endpoint) {
+            Ok(url) => endpoint_reachable(&url, Duration::from_millis(500)),
+            Err(_) => false,
+        }
+    }
+
     async fn resolve_backend(&self) -> anyhow::Result<ResolvedBackend> {
         let configured = self.configured_backend()?;
 
@@ -360,6 +406,17 @@ impl BrowserTool {
                 }
                 Ok(ResolvedBackend::ComputerUse)
             }
+            BrowserBackendKind::Bridge => {
+                if self.bridge_available() {
+                    Ok(ResolvedBackend::Bridge)
+                } else {
+                    anyhow::bail!(
+                        "browser.backend='bridge' but bridge server is unreachable at {}. \
+                         Start the bridge server: cd bridge-server && npm start",
+                        self.bridge.endpoint
+                    )
+                }
+            }
             BrowserBackendKind::Auto => {
                 if Self::rust_native_compiled() && self.rust_native_available() {
                     return Ok(ResolvedBackend::RustNative);
@@ -374,25 +431,29 @@ impl BrowserTool {
                     Err(err) => Some(err.to_string()),
                 };
 
+                if self.bridge_available() {
+                    return Ok(ResolvedBackend::Bridge);
+                }
+
                 if Self::rust_native_compiled() {
                     if let Some(err) = computer_use_err {
                         anyhow::bail!(
-                            "browser.backend='auto' found no usable backend (agent-browser missing, rust-native unavailable, computer-use invalid: {err})"
+                            "browser.backend='auto' found no usable backend (agent-browser missing, rust-native unavailable, computer-use invalid: {err}, bridge unreachable)"
                         );
                     }
                     anyhow::bail!(
-                        "browser.backend='auto' found no usable backend (agent-browser missing, rust-native unavailable, computer-use sidecar unreachable)"
+                        "browser.backend='auto' found no usable backend (agent-browser missing, rust-native unavailable, computer-use sidecar unreachable, bridge unreachable)"
                     )
                 }
 
                 if let Some(err) = computer_use_err {
                     anyhow::bail!(
-                        "browser.backend='auto' needs agent-browser CLI, browser-native, or valid computer-use sidecar (error: {err})"
+                        "browser.backend='auto' needs agent-browser CLI, browser-native, computer-use sidecar, or bridge server (computer-use error: {err})"
                     );
                 }
 
                 anyhow::bail!(
-                    "browser.backend='auto' needs agent-browser CLI, browser-native, or computer-use sidecar"
+                    "browser.backend='auto' needs agent-browser CLI, browser-native, computer-use sidecar, or bridge server"
                 )
             }
         }
@@ -851,6 +912,87 @@ impl BrowserTool {
         })
     }
 
+    /// Execute a browser action via the bridge server (Chrome extension bridge).
+    async fn execute_bridge_action(
+        &self,
+        action: &str,
+        args: &Value,
+    ) -> anyhow::Result<ToolResult> {
+        let endpoint = self.bridge.endpoint.trim();
+        if endpoint.is_empty() {
+            anyhow::bail!("browser.bridge.endpoint is not configured");
+        }
+
+        let mut payload = args
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        payload.remove("action");
+
+        // Map ZeroClaw action names to bridge server actions
+        let bridge_action = match action {
+            "open" => "navigate",
+            "snapshot" => "scrape",
+            other => other,
+        };
+        payload.insert("action".into(), json!(bridge_action));
+
+        let client = crate::config::build_runtime_proxy_client("tool.browser.bridge");
+        let response = client
+            .post(endpoint)
+            .timeout(Duration::from_millis(self.bridge.timeout_ms))
+            .json(&payload)
+            .send()
+            .await
+            .with_context(|| {
+                format!("Failed to reach bridge server at {endpoint}")
+            })?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .context("Failed to read bridge server response")?;
+
+        if let Ok(parsed) = serde_json::from_str::<BridgeResponse>(&body) {
+            if status.is_success() && parsed.success {
+                let output = parsed
+                    .data
+                    .map(|d| serde_json::to_string_pretty(&d).unwrap_or_default())
+                    .unwrap_or_default();
+                return Ok(ToolResult {
+                    success: true,
+                    output,
+                    error: None,
+                });
+            }
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: parsed
+                    .error
+                    .or_else(|| Some(format!("Bridge request failed (HTTP {status})"))),
+            });
+        }
+
+        if status.is_success() {
+            return Ok(ToolResult {
+                success: true,
+                output: body,
+                error: None,
+            });
+        }
+
+        Ok(ToolResult {
+            success: false,
+            output: String::new(),
+            error: Some(format!(
+                "Bridge server error (HTTP {status}): {}",
+                body.trim()
+            )),
+        })
+    }
+
     async fn execute_action(
         &self,
         action: BrowserAction,
@@ -859,8 +1001,8 @@ impl BrowserTool {
         match backend {
             ResolvedBackend::AgentBrowser => self.execute_agent_browser_action(action).await,
             ResolvedBackend::RustNative => self.execute_rust_native_action(action).await,
-            ResolvedBackend::ComputerUse => anyhow::bail!(
-                "Internal error: computer_use backend must be handled before BrowserAction parsing"
+            ResolvedBackend::ComputerUse | ResolvedBackend::Bridge => anyhow::bail!(
+                "Internal error: {backend:?} backend must be handled before BrowserAction parsing"
             ),
         }
     }
@@ -1061,6 +1203,10 @@ impl Tool for BrowserTool {
 
         if backend == ResolvedBackend::ComputerUse {
             return self.execute_computer_use_action(action_str, &args).await;
+        }
+
+        if backend == ResolvedBackend::Bridge {
+            return self.execute_bridge_action(action_str, &args).await;
         }
 
         if is_computer_use_only_action(action_str) {
@@ -1961,6 +2107,7 @@ fn backend_name(backend: ResolvedBackend) -> &'static str {
         ResolvedBackend::AgentBrowser => "agent_browser",
         ResolvedBackend::RustNative => "rust_native",
         ResolvedBackend::ComputerUse => "computer_use",
+        ResolvedBackend::Bridge => "bridge",
     }
 }
 
@@ -2266,6 +2413,10 @@ mod tests {
             BrowserBackendKind::ComputerUse
         );
         assert_eq!(
+            BrowserBackendKind::parse("bridge").unwrap(),
+            BrowserBackendKind::Bridge
+        );
+        assert_eq!(
             BrowserBackendKind::parse("auto").unwrap(),
             BrowserBackendKind::Auto
         );
@@ -2298,6 +2449,7 @@ mod tests {
             "http://127.0.0.1:9515".into(),
             None,
             ComputerUseConfig::default(),
+            BridgeConfig::default(),
         );
         assert_eq!(tool.configured_backend().unwrap(), BrowserBackendKind::Auto);
     }
@@ -2314,6 +2466,7 @@ mod tests {
             "http://127.0.0.1:9515".into(),
             None,
             ComputerUseConfig::default(),
+            BridgeConfig::default(),
         );
         assert_eq!(
             tool.configured_backend().unwrap(),
@@ -2336,6 +2489,7 @@ mod tests {
                 endpoint: "http://computer-use.example.com/v1/actions".into(),
                 ..ComputerUseConfig::default()
             },
+            BridgeConfig::default(),
         );
 
         assert!(tool.computer_use_endpoint_url().is_err());
@@ -2357,6 +2511,7 @@ mod tests {
                 allow_remote_endpoint: true,
                 ..ComputerUseConfig::default()
             },
+            BridgeConfig::default(),
         );
 
         assert!(tool.computer_use_endpoint_url().is_ok());
@@ -2378,6 +2533,7 @@ mod tests {
                 max_coordinate_y: Some(100),
                 ..ComputerUseConfig::default()
             },
+            BridgeConfig::default(),
         );
 
         assert!(tool
@@ -2481,6 +2637,29 @@ mod tests {
             let err = anyhow::anyhow!(message);
             assert!(!is_recoverable_rust_native_error(&err), "{message}");
         }
+    }
+
+    #[test]
+    fn browser_tool_accepts_bridge_backend_config() {
+        let security = Arc::new(SecurityPolicy::default());
+        let tool = BrowserTool::new_with_backend(
+            security,
+            vec!["example.com".into()],
+            None,
+            "bridge".into(),
+            true,
+            "http://127.0.0.1:9515".into(),
+            None,
+            ComputerUseConfig::default(),
+            BridgeConfig {
+                endpoint: "http://127.0.0.1:7823/command".into(),
+                timeout_ms: 30_000,
+            },
+        );
+        assert_eq!(
+            tool.configured_backend().unwrap(),
+            BrowserBackendKind::Bridge
+        );
     }
 
     #[cfg(feature = "browser-native")]
