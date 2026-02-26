@@ -407,11 +407,14 @@ impl BrowserTool {
             }
         }
 
-        // Determine server.js path: user-provided or write bundled to temp dir
+        // Determine server.js path: user-provided or write bundled to ~/.zeroclaw/bridge-server/
         let server_path = if let Some(ref path) = self.bridge.server_path {
             std::path::PathBuf::from(path)
         } else {
-            let dir = std::env::temp_dir().join("zeroclaw-bridge");
+            let home = std::env::var("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::env::temp_dir());
+            let dir = home.join(".zeroclaw").join("bridge-server");
             std::fs::create_dir_all(&dir)?;
             let path = dir.join("server.js");
             std::fs::write(&path, BRIDGE_SERVER_JS)?;
