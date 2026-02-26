@@ -1022,59 +1022,82 @@ impl BrowserTool {
         payload.insert("action".into(), json!(bridge_action));
 
         let client = crate::config::build_runtime_proxy_client("tool.browser.bridge");
-        let response = client
-            .post(endpoint)
-            .timeout(Duration::from_millis(self.bridge.timeout_ms))
-            .json(&payload)
-            .send()
-            .await
-            .with_context(|| {
-                format!("Failed to reach bridge server at {endpoint}")
-            })?;
 
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .context("Failed to read bridge server response")?;
+        // Retry loop: the bridge server may be up but the Chrome extension
+        // hasn't connected yet (takes a few seconds after server start).
+        // Retry up to 3 times with 2s gaps when the error is "not connected".
+        let max_retries = 3;
+        for attempt in 0..=max_retries {
+            let response = client
+                .post(endpoint)
+                .timeout(Duration::from_millis(self.bridge.timeout_ms))
+                .json(&payload)
+                .send()
+                .await
+                .with_context(|| {
+                    format!("Failed to reach bridge server at {endpoint}")
+                })?;
 
-        if let Ok(parsed) = serde_json::from_str::<BridgeResponse>(&body) {
-            if status.is_success() && parsed.success {
-                let output = parsed
-                    .data
-                    .map(|d| serde_json::to_string_pretty(&d).unwrap_or_default())
-                    .unwrap_or_default();
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .context("Failed to read bridge server response")?;
+
+            if let Ok(parsed) = serde_json::from_str::<BridgeResponse>(&body) {
+                if status.is_success() && parsed.success {
+                    let output = parsed
+                        .data
+                        .map(|d| serde_json::to_string_pretty(&d).unwrap_or_default())
+                        .unwrap_or_default();
+                    return Ok(ToolResult {
+                        success: true,
+                        output,
+                        error: None,
+                    });
+                }
+
+                // If extension not connected and we have retries left, wait and retry
+                let err_msg = parsed.error.as_deref().unwrap_or("");
+                if attempt < max_retries && err_msg.contains("not connected") {
+                    debug!(
+                        "Bridge server up but extension not connected, retrying in 2s (attempt {}/{})",
+                        attempt + 1,
+                        max_retries
+                    );
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: parsed
+                        .error
+                        .or_else(|| Some(format!("Bridge request failed (HTTP {status})"))),
+                });
+            }
+
+            if status.is_success() {
                 return Ok(ToolResult {
                     success: true,
-                    output,
+                    output: body,
                     error: None,
                 });
             }
+
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: parsed
-                    .error
-                    .or_else(|| Some(format!("Bridge request failed (HTTP {status})"))),
+                error: Some(format!(
+                    "Bridge server error (HTTP {status}): {}",
+                    body.trim()
+                )),
             });
         }
 
-        if status.is_success() {
-            return Ok(ToolResult {
-                success: true,
-                output: body,
-                error: None,
-            });
-        }
-
-        Ok(ToolResult {
-            success: false,
-            output: String::new(),
-            error: Some(format!(
-                "Bridge server error (HTTP {status}): {}",
-                body.trim()
-            )),
-        })
+        // Should be unreachable — loop always returns
+        anyhow::bail!("Bridge command failed after {max_retries} retries")
     }
 
     async fn execute_action(
