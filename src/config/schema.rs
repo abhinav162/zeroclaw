@@ -969,6 +969,10 @@ pub struct BrowserBridgeConfig {
     /// Path to bridge server.js (optional — uses bundled server if omitted)
     #[serde(default)]
     pub server_path: Option<String>,
+    /// Maximum characters in tool output returned to the model (default: 20000).
+    /// Responses exceeding this limit are truncated with a notice.
+    #[serde(default = "default_bridge_max_output_chars")]
+    pub max_output_chars: usize,
 }
 
 fn default_browser_bridge_endpoint() -> String {
@@ -979,6 +983,10 @@ fn default_browser_bridge_timeout_ms() -> u64 {
     30_000
 }
 
+fn default_bridge_max_output_chars() -> usize {
+    20_000
+}
+
 impl Default for BrowserBridgeConfig {
     fn default() -> Self {
         Self {
@@ -986,6 +994,7 @@ impl Default for BrowserBridgeConfig {
             timeout_ms: default_browser_bridge_timeout_ms(),
             auto_start: true,
             server_path: None,
+            max_output_chars: default_bridge_max_output_chars(),
         }
     }
 }

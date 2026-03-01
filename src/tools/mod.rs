@@ -270,6 +270,7 @@ pub fn all_tools_with_runtime(
                 timeout_ms: browser_config.bridge.timeout_ms,
                 auto_start: browser_config.bridge.auto_start,
                 server_path: browser_config.bridge.server_path.clone(),
+                max_output_chars: browser_config.bridge.max_output_chars,
             },
         )));
     }

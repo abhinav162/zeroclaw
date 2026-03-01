@@ -128,7 +128,7 @@ function json(res, status, data) {
   res.end(body);
 }
 
-const ACTIONS = new Set(["navigate","click","fill","scrape","screenshot","scroll","hover","get_text","get_title"]);
+const ACTIONS = new Set(["navigate","click","fill","scrape","snapshot","screenshot","scroll","hover","get_text","get_title"]);
 
 const restServer = http.createServer(async (req, res) => {
   try {

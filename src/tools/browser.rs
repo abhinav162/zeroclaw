@@ -64,6 +64,9 @@ pub struct BridgeConfig {
     pub timeout_ms: u64,
     pub auto_start: bool,
     pub server_path: Option<String>,
+    /// Maximum characters in tool output returned to the model.
+    /// Responses exceeding this limit are truncated with a notice.
+    pub max_output_chars: usize,
 }
 
 impl Default for BridgeConfig {
@@ -73,6 +76,7 @@ impl Default for BridgeConfig {
             timeout_ms: 30_000,
             auto_start: true,
             server_path: None,
+            max_output_chars: 20_000,
         }
     }
 }
@@ -1048,7 +1052,7 @@ impl BrowserTool {
         // Map ZeroClaw action names to bridge server actions
         let bridge_action = match action {
             "open" => "navigate",
-            "snapshot" => "scrape",
+            // "snapshot" now handled natively by the extension
             other => other,
         };
         payload.insert("action".into(), json!(bridge_action));
@@ -1082,6 +1086,12 @@ impl BrowserTool {
                         .data
                         .map(|d| serde_json::to_string_pretty(&d).unwrap_or_default())
                         .unwrap_or_default();
+                    let output = if output.len() > self.bridge.max_output_chars {
+                        let truncated = &output[..self.bridge.max_output_chars];
+                        format!("{truncated}\n\n[... truncated at {} chars]", self.bridge.max_output_chars)
+                    } else {
+                        output
+                    };
                     return Ok(ToolResult {
                         success: true,
                         output,
@@ -2825,6 +2835,7 @@ mod tests {
                 timeout_ms: 30_000,
                 auto_start: false,
                 server_path: None,
+                max_output_chars: 20_000,
             },
         );
         assert_eq!(
